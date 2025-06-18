@@ -79,16 +79,72 @@ public class GitService(ILogger<GitService> logger, GitMirrorConfig config)
 
     private void CleanupLocalRepository()
     {
-        if (Directory.Exists(_config.LocalPath))
+        if (!Directory.Exists(_config.LocalPath))
+            return;
+
+        try
         {
-            try
+            _logger.LogDebug("Cleaning up local repository: {LocalPath}", _config.LocalPath);
+            
+            // Force delete with read-only file handling
+            DeleteDirectoryWithReadOnlyFiles(_config.LocalPath);
+            
+            _logger.LogDebug("Successfully cleaned up local repository");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clean up local repository: {LocalPath}", _config.LocalPath);
+            throw new InvalidOperationException($"Unable to clean up local repository at '{_config.LocalPath}'. This may prevent future sync operations.", ex);
+        }
+    }
+
+    private static void DeleteDirectoryWithReadOnlyFiles(string path)
+    {
+        if (!Directory.Exists(path))
+            return;
+
+        // Remove read-only attributes from all files recursively
+        ClearReadOnlyAttributes(path);
+        
+        // Now delete the directory
+        Directory.Delete(path, recursive: true);
+    }
+
+    private static void ClearReadOnlyAttributes(string path)
+    {
+        try
+        {
+            // Clear read-only attribute from the directory itself
+            var dirInfo = new DirectoryInfo(path);
+            if (dirInfo.Attributes.HasFlag(FileAttributes.ReadOnly))
             {
-                Directory.Delete(_config.LocalPath, true);
+                dirInfo.Attributes &= ~FileAttributes.ReadOnly;
             }
-            catch (Exception ex)
+
+            // Clear read-only attributes from all files
+            foreach (var file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
             {
-                _logger.LogWarning(ex, "Failed to clean up local repository");
+                var fileInfo = new FileInfo(file);
+                if (fileInfo.Attributes.HasFlag(FileAttributes.ReadOnly))
+                {
+                    fileInfo.Attributes &= ~FileAttributes.ReadOnly;
+                }
             }
+
+            // Clear read-only attributes from all subdirectories
+            foreach (var dir in Directory.GetDirectories(path, "*", SearchOption.AllDirectories))
+            {
+                var subDirInfo = new DirectoryInfo(dir);
+                if (subDirInfo.Attributes.HasFlag(FileAttributes.ReadOnly))
+                {
+                    subDirInfo.Attributes &= ~FileAttributes.ReadOnly;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log but don't fail - the delete might still work
+            Console.WriteLine($"Warning: Could not clear read-only attributes: {ex.Message}");
         }
     }
 
