@@ -5,18 +5,12 @@ using GitMirror.Configuration;
 
 namespace GitMirror.Services;
 
-public class GitService
+public class GitService(ILogger<GitService> logger, GitMirrorConfig config)
 {
-    private readonly ILogger<GitService> _logger;
-    private readonly GitMirrorConfig _config;
+    private readonly ILogger<GitService> _logger = logger;
+    private readonly GitMirrorConfig _config = config;
     private const string OriginRemoteName = "origin";
     private const string SourceRemoteName = "source";
-
-    public GitService(ILogger<GitService> logger, GitMirrorConfig config)
-    {
-        _logger = logger;
-        _config = config;
-    }
 
     public Task<bool> MirrorRepositoryAsync()
     {
@@ -239,13 +233,16 @@ public class GitService
             // Try to use system Git credential helper by invoking git credential fill
             try
             {
-                _logger.LogDebug("Attempting to use system Git credential helper for {Url}", url);
+                LogCredentialGuidance(url);
+
                 var credentials = GetSystemCredentials(url);
                 if (credentials != null)
                 {
-                    _logger.LogDebug("Successfully obtained credentials from system for {Url}", url);
+                    _logger.LogInformation("Successfully authenticated with {Url}", url);
                     return credentials;
                 }
+
+                _logger.LogWarning("Git credential helper did not provide valid credentials for {Url}", url);
             }
             catch (Exception ex)
             {
@@ -263,61 +260,143 @@ public class GitService
         try
         {
             var uri = new Uri(url);
-            var process = new System.Diagnostics.Process();
-            process.StartInfo.FileName = "git";
-            process.StartInfo.Arguments = "credential fill";
-            process.StartInfo.UseShellExecute = false;
-            process.StartInfo.RedirectStandardInput = true;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.StartInfo.CreateNoWindow = true;
-
+            using var process = CreateGitCredentialProcess();
+            
+            _logger.LogDebug("Starting git credential process for {Url}", url);
             process.Start();
 
-            // Send the URL info to git credential
-            using (var writer = process.StandardInput)
-            {
-                writer.WriteLine($"protocol={uri.Scheme}");
-                writer.WriteLine($"host={uri.Host}");
-                if (uri.Port != -1 && !uri.IsDefaultPort)
-                {
-                    writer.WriteLine($"port={uri.Port}");
-                }
-                writer.WriteLine($"path={uri.AbsolutePath.TrimStart('/')}");
-                writer.WriteLine(); // Empty line to signal end
-            }
+            SendUrlInfoToProcess(process, uri);
+            
+            _logger.LogInformation("Waiting for Git credential authentication (this may show a dialog)...");
+            process.WaitForExit(30000); // 30 second timeout for interactive dialogs
 
-            process.WaitForExit(5000); // 5 second timeout
-
-            if (process.ExitCode == 0)
-            {
-                string? username = null;
-                string? password = null;
-                
-                string output = process.StandardOutput.ReadToEnd();
-                foreach (string line in output.Split('\n'))
-                {
-                    if (line.StartsWith("username="))
-                        username = line.Substring(9).Trim();
-                    else if (line.StartsWith("password="))
-                        password = line.Substring(9).Trim();
-                }
-
-                if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
-                {
-                    return new UsernamePasswordCredentials
-                    {
-                        Username = username,
-                        Password = password
-                    };
-                }
-            }
+            return HandleProcessResult(process);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Exception while trying to get system credentials");
+            return null;
+        }
+    }
+
+    private static System.Diagnostics.Process CreateGitCredentialProcess()
+    {
+        var process = new System.Diagnostics.Process();
+        process.StartInfo.FileName = "git";
+        process.StartInfo.Arguments = "credential fill";
+        process.StartInfo.UseShellExecute = false;
+        process.StartInfo.RedirectStandardInput = true;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.RedirectStandardError = true;
+        process.StartInfo.CreateNoWindow = false; // Allow UI dialogs to show
+
+        // Set environment variables to allow interactive authentication
+        process.StartInfo.Environment["GIT_TERMINAL_PROMPT"] = "1";
+        process.StartInfo.Environment["GCM_INTERACTIVE"] = "auto";
+
+        return process;
+    }
+
+    private static void SendUrlInfoToProcess(System.Diagnostics.Process process, Uri uri)
+    {
+        using var writer = process.StandardInput;
+        writer.WriteLine($"protocol={uri.Scheme}");
+        writer.WriteLine($"host={uri.Host}");
+        if (uri.Port != -1 && !uri.IsDefaultPort)
+        {
+            writer.WriteLine($"port={uri.Port}");
+        }
+        writer.WriteLine($"path={uri.AbsolutePath.TrimStart('/')}");
+        writer.WriteLine(); // Empty line to signal end
+    }
+
+    private UsernamePasswordCredentials? HandleProcessResult(System.Diagnostics.Process process)
+    {
+        if (process.HasExited && process.ExitCode == 0)
+        {
+            return ParseCredentialsFromOutput(process.StandardOutput.ReadToEnd());
+        }
+        
+        if (!process.HasExited)
+        {
+            _logger.LogWarning("Git credential process timed out - killing process");
+            process.Kill();
+            process.WaitForExit(1000);
+        }
+        else
+        {
+            LogProcessError(process);
         }
 
         return null;
+    }
+
+    private UsernamePasswordCredentials? ParseCredentialsFromOutput(string output)
+    {
+        _logger.LogDebug("Git credential output received");
+        
+        string? username = null;
+        string? password = null;
+
+        foreach (string line in output.Split('\n'))
+        {
+            if (line.StartsWith("username="))
+                username = line.Substring(9).Trim();
+            else if (line.StartsWith("password="))
+                password = line.Substring(9).Trim();
+        }
+
+        if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+        {
+            _logger.LogDebug("Successfully obtained credentials from Git credential helper");
+            return new UsernamePasswordCredentials
+            {
+                Username = username,
+                Password = password
+            };
+        }
+
+        _logger.LogWarning("Git credential helper returned success but no valid username/password");
+        return null;
+    }
+
+    private void LogProcessError(System.Diagnostics.Process process)
+    {
+        _logger.LogWarning("Git credential process exited with code: {ExitCode}", process.ExitCode);
+        string errorOutput = process.StandardError.ReadToEnd();
+        if (!string.IsNullOrEmpty(errorOutput))
+        {
+            _logger.LogDebug("Git credential error output: {ErrorOutput}", errorOutput);
+        }
+    }
+
+    /// <summary>
+    /// Checks if the application is running in an interactive environment
+    /// </summary>
+    private static bool IsInteractiveEnvironment()
+    {
+        return Environment.UserInteractive && !Console.IsInputRedirected && !Console.IsOutputRedirected;
+    }
+
+    /// <summary>
+    /// Provides user-friendly guidance for credential configuration
+    /// </summary>
+    private void LogCredentialGuidance(string url)
+    {
+        _logger.LogInformation("=== Git Authentication Required ===");
+        _logger.LogInformation("Repository: {Url}", url);
+        
+        if (IsInteractiveEnvironment())
+        {
+            _logger.LogInformation("If a dialog appears, please select your GitHub account and complete authentication.");
+            _logger.LogInformation("This may take up to 30 seconds...");
+        }
+        else
+        {
+            _logger.LogInformation("Running in non-interactive mode. Consider setting explicit credentials:");
+            _logger.LogInformation("Option 1: Set environment variables:");
+            _logger.LogInformation("  GitMirror__TargetRepository__Token=your-github-token");
+            _logger.LogInformation("Option 2: Update appsettings.json with your credentials");
+        }
     }
 }
