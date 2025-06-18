@@ -94,7 +94,32 @@ You can also override configuration using command line arguments or environment 
 
 ## Authentication
 
-### Personal Access Tokens (Recommended)
+GitMirror supports multiple authentication methods and will automatically use your system's Git credentials when no explicit credentials are provided.
+
+### System Credential Helper (Recommended for Development)
+
+If you leave the `Username` and `Token` fields empty, GitMirror will use the same credentials as your Git client:
+
+```json
+{
+  "GitMirror": {
+    "SourceRepository": {
+      "Url": "https://github.com/source/repository.git",
+      "Branch": "main",
+      "Username": "",
+      "Token": ""
+    }
+  }
+}
+```
+
+This works with:
+- **Git Credential Manager**: Windows, macOS, Linux credential storage
+- **SSH Keys**: If configured in your Git client
+- **Cached credentials**: From previous Git operations
+- **Windows Credential Store**: Stored GitHub/GitLab tokens
+
+### Personal Access Tokens (Recommended for Production)
 
 For GitHub, GitLab, and other Git hosting services, use personal access tokens:
 
@@ -102,11 +127,35 @@ For GitHub, GitLab, and other Git hosting services, use personal access tokens:
 2. Set the `Token` field in the configuration
 3. Leave `Username` empty or set it to your username
 
+```json
+{
+  "GitMirror": {
+    "SourceRepository": {
+      "Url": "https://github.com/source/repository.git",
+      "Branch": "main",
+      "Username": "your-username",
+      "Token": "ghp_your_personal_access_token"
+    }
+  }
+}
+```
+
 ### Username/Password
 
 For basic authentication:
 
-1. Set both `Username` and `Token` (where `Token` is your password)
+```json
+{
+  "GitMirror": {
+    "SourceRepository": {
+      "Url": "https://github.com/source/repository.git",
+      "Branch": "main",
+      "Username": "your-username",
+      "Token": "your-password"
+    }
+  }
+}
+```
 
 ### Environment Variables
 
